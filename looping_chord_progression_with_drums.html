@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Looping Chord Progression + Simple Drums</title>
+  <style>
+    body { margin:0; background:#0b0b0b; color:#eee; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    main { max-width:980px; margin:0 auto; padding:20px; }
+    h1 { font-size:18px; margin:0 0 12px; }
+    h2 { font-size:16px; margin:20px 0 8px; color:#ddd; }
+    p { color:#aaa; font-size:14px; margin:6px 0; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
+    input[type="number"], select, button {
+      background:#111; color:#fff; border:1px solid #333; padding:8px 10px; border-radius:8px;
+    }
+    input[type="number"]{ width:84px; }
+    button { cursor:pointer; font-weight:700; }
+    button:hover{ border-color:#888; }
+    .bars { display:grid; grid-template-columns: 1fr; gap:8px; }
+    .bar { display:grid; grid-template-columns: 140px 170px 84px auto; align-items:center; gap:8px; background:#0f0f0f; border:1px solid #222; padding:8px; border-radius:8px; }
+    .bar label { font-size:12px; color:#aaa; }
+    .bar .meta { display:flex; gap:8px; align-items:center; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; }
+    .chip { background:#111; border:1px solid #333; padding:6px 10px; border-radius:999px; cursor:pointer; font-weight:700; }
+    .muted { color:#888; font-size:12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Looping Chord Progression + Simple Drums</h1>
+    <p class="muted">Choose chords from dropdowns. The progression will loop until you press <b>Stop</b>.</p>
+
+    <div class="row">
+      <label>BPM: <input id="bpm" type="number" min="40" max="240" step="1" value="100"></label>
+      <label>Time Sig (beats/bar): 
+        <select id="timesig">
+          <option value="4">4/4</option>
+          <option value="3">3/4</option>
+          <option value="6">6/8</option>
+        </select>
+      </label>
+      <label>Voicing: 
+        <select id="voicing">
+          <option value="mid" selected>Mid (around C4)</option>
+          <option value="low">Low (guitar-ish)</option>
+          <option value="high">High</option>
+        </select>
+      </label>
+      <label>Play mode:
+        <select id="mode">
+          <option value="block" selected>Block</option>
+          <option value="arpUp">Arp Up</option>
+          <option value="arpDown">Arp Down</option>
+        </select>
+      </label>
+    </div>
+
+    <h2>Drums</h2>
+    <div class="row">
+      <label><input id="drumsOn" type="checkbox" checked> Enable drums (kick, snare, hihat)</label>
+      <label>Pattern: 
+        <select id="drumPattern">
+          <option value="basic" selected>Basic (K:1&3 / S:2&4 / H:8ths)</option>
+          <option value="four">Four on the floor (K:1-4 / S:2&4 / H:8ths)</option>
+          <option value="half">Half-time (K:1 / S:3 / H:8ths)</option>
+        </select>
+      </label>
+      <label>Hat rate:
+        <select id="hatRate">
+          <option value="8" selected>8th</option>
+          <option value="16">16th</option>
+        </select>
+      </label>
+      <label>Drum Volume: <input id="drumVol" type="number" min="0" max="1" step="0.05" value="0.25"></label>
+    </div>
+
+    <h2>Progression</h2>
+    <div id="bars" class="bars"></div>
+    <div class="row">
+      <button id="addBar">+ Add bar</button>
+      <button id="removeBar">– Remove last bar</button>
+      <span class="muted">Each bar has: Root, Type, Beats.</span>
+    </div>
+
+    <h2>Quick Presets</h2>
+    <div class="chips">
+      <span class="chip" data-prog="C:maj7:4|A:m7:4|D:m7:4|G:7:4">Jazz ii–V–I in C</span>
+      <span class="chip" data-prog="E:m:4|C:maj:4|G:maj:4|D:maj:4">Pop 4-chord (Em–C–G–D)</span>
+      <span class="chip" data-prog="A:m:4|G:maj:4|F:maj:4|E:7:4">Spanish-ish</span>
+      <span class="chip" data-prog="D:m7:4|G:7:4|C:maj7:8">ii–V–I (Dm7–G7–Cmaj7)</span>
+    </div>
+
+    <div class="row">
+      <button id="start">Start (Loop)</button>
+      <button id="stop">Stop</button>
+    </div>
+  </main>
+
+  <script>
+    // ====== Web Audio setup ======
+    let ctx, master, drumBus;
+    function ac(){
+      if(!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)();
+      if(ctx.state === 'suspended') ctx.resume();
+      if(!master){
+        master = ctx.createGain();
+        master.gain.value = 0.3;
+        master.connect(ctx.destination);
+      }
+      if(!drumBus){
+        drumBus = ctx.createGain();
+        drumBus.gain.value = parseFloat(document.getElementById('drumVol').value || '0.25');
+        drumBus.connect(master);
+      }
+      return ctx;
+    }
+
+    // ====== Music utils ======
+    const NOTE_INDEX = {C:0, D:2, E:4, F:5, G:7, A:9, B:11};
+    const ROOT_OPTIONS = ['C','C#','Db','D','D#','Eb','E','F','F#','Gb','G','G#','Ab','A','A#','Bb','B'];
+    function parseRootPc(token){
+      const m = token.match(/^([A-Ga-g])([#b]?)/);
+      if(!m) return null;
+      let L = m[1].toUpperCase();
+      let acc = m[2]||'';
+      let semis = NOTE_INDEX[L];
+      if(acc==='#') semis += 1;
+      if(acc==='b') semis -= 1;
+      return (semis+12)%12;
+    }
+
+    // chord dictionary (pitch-class intervals)
+    const CHORDS = {
+      'maj' :  [0,4,7],
+      'm'   :  [0,3,7],
+      'min' :  [0,3,7],
+      '7'   :  [0,4,7,10],
+      'maj7':  [0,4,7,11],
+      'm7'  :  [0,3,7,10],
+      'dim' :  [0,3,6],
+      'm7b5':  [0,3,6,10],
+      'sus2':  [0,2,7],
+      'sus4':  [0,5,7],
+      'add9':  [0,4,7,14]
+    };
+    const CHORD_ORDER = ['maj','m','7','maj7','m7','dim','m7b5','sus2','sus4','add9'];
+
+    function chordPitches(rootPc, intervals, octaveBase=4){
+      const pcs = intervals.map(i => (rootPc + i)%12);
+      const rootMidi = (octaveBase+1)*12 + rootPc; // C4=60 base
+      // compact voicing: map pcs above root within ~2 octaves
+      return pcs.map(pc=>{
+        let midi = rootMidi + ((pc - rootPc + 12)%12);
+        while(midi > rootMidi + 16) midi -= 12;
+        return 440 * Math.pow(2, (midi - 69)/12);
+      });
+    }
+
+    // ====== Synths ======
+    function voice(freq, t0, dur, type='triangle'){
+      const c = ac();
+      const o = c.createOscillator();
+      const g = c.createGain();
+      const f = c.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.value = 3800;
+      o.type = type; o.frequency.setValueAtTime(freq, t0);
+      const a = Math.min(0.02, dur*0.1);
+      const r = Math.min(0.25, dur*0.3);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(0.9, t0 + a);
+      g.gain.linearRampToValueAtTime(0.7, t0 + Math.max(a, dur - r));
+      g.gain.linearRampToValueAtTime(0, t0 + dur);
+      o.connect(f).connect(g).connect(master);
+      o.start(t0);
+      o.stop(t0 + dur + 0.05);
+    }
+
+    function playChord(pitches, t0, dur, mode='block'){
+      const order = [...pitches];
+      if(mode==='arpDown') order.reverse();
+      const step = dur / Math.max(1, order.length);
+      order.forEach((freq, i)=>{
+        const start = (mode==='block') ? t0 : t0 + i*step*0.9;
+        voice(freq, start, dur*0.95);
+      });
+    }
+
+    // ====== Drums ======
+    function kick(t){
+      const c = ac();
+      const o = c.createOscillator();
+      const g = c.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(130, t);
+      o.frequency.exponentialRampToValueAtTime(45, t+0.12);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.9, t+0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t+0.25);
+      o.connect(g).connect(drumBus);
+      o.start(t); o.stop(t+0.26);
+    }
+    function noiseBuffer(){
+      const c = ac();
+      const buffer = c.createBuffer(1, c.sampleRate*1, c.sampleRate);
+      const data = buffer.getChannelData(0);
+      for(let i=0;i<data.length;i++) data[i] = Math.random()*2-1;
+      return buffer;
+    }
+    const NOISE = {buf:null};
+    function snare(t){
+      const c = ac();
+      if(!NOISE.buf) NOISE.buf = noiseBuffer();
+      const src = c.createBufferSource();
+      src.buffer = NOISE.buf;
+      const bp = c.createBiquadFilter();
+      bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=0.7;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.5, t+0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t+0.15);
+      src.connect(bp).connect(g).connect(drumBus);
+      src.start(t); src.stop(t+0.16);
+    }
+    function hihat(t, len=0.05){
+      const c = ac();
+      if(!NOISE.buf) NOISE.buf = noiseBuffer();
+      const src = c.createBufferSource();
+      src.buffer = NOISE.buf;
+      const hp = c.createBiquadFilter();
+      hp.type='highpass'; hp.frequency.value=6000; hp.Q.value=0.7;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.35, t+0.003);
+      g.gain.exponentialRampToValueAtTime(0.0001, t+len);
+      src.connect(hp).connect(g).connect(drumBus);
+      src.start(t); src.stop(t+len+0.02);
+    }
+
+    // ====== Bars UI ======
+    const barsEl = document.getElementById('bars');
+    function makeSelect(options){
+      const s = document.createElement('select');
+      options.forEach(v=>{
+        const o = document.createElement('option');
+        o.value=v; o.textContent=v;
+        s.appendChild(o);
+      });
+      return s;
+    }
+    function addBar(root='C', type='maj', beats=null){
+      const bar = document.createElement('div');
+      bar.className='bar';
+      const rootSel = makeSelect(ROOT_OPTIONS);
+      rootSel.value = root;
+      const typeSel = makeSelect(CHORD_ORDER);
+      typeSel.value = type;
+      const beatsInput = document.createElement('input');
+      beatsInput.type='number'; beatsInput.min='1'; beatsInput.step='1';
+      beatsInput.value = beats ?? document.getElementById('timesig').value;
+
+      const rootWrap = document.createElement('div');
+      rootWrap.appendChild(rootSel);
+      const typeWrap = document.createElement('div');
+      typeWrap.appendChild(typeSel);
+      const beatsWrap = document.createElement('div');
+      beatsWrap.appendChild(beatsInput);
+      const meta = document.createElement('div');
+      meta.className='meta';
+      const lbl1 = document.createElement('label'); lbl1.textContent='Root';
+      const lbl2 = document.createElement('label'); lbl2.textContent='Type';
+      const lbl3 = document.createElement('label'); lbl3.textContent='Beats';
+      rootWrap.prepend(lbl1); typeWrap.prepend(lbl2); beatsWrap.prepend(lbl3);
+      bar.appendChild(rootWrap);
+      bar.appendChild(typeWrap);
+      bar.appendChild(beatsWrap);
+      barsEl.appendChild(bar);
+    }
+    function removeBar(){
+      const last = barsEl.lastElementChild;
+      if(last) barsEl.removeChild(last);
+    }
+
+    // Seed with 4 bars
+    addBar('C','maj7');
+    addBar('A','m7');
+    addBar('D','m7');
+    addBar('G','7');
+
+    // Buttons
+    document.getElementById('addBar').addEventListener('click', ()=> addBar());
+    document.getElementById('removeBar').addEventListener('click', removeBar);
+
+    // Presets
+    document.querySelectorAll('.chip').forEach(c=>{
+      c.addEventListener('click', ()=>{
+        barsEl.innerHTML='';
+        const spec = c.dataset.prog.split('|').map(s=>s.trim());
+        spec.forEach(tok=>{
+          const m = tok.match(/^([A-G][#b]?):([a-zA-Z0-9]+):(\d+)$/);
+          if(m){
+            addBar(m[1], m[2], parseInt(m[3],10));
+          }
+        });
+      });
+    });
+
+    // ====== Transport & Scheduler (Looping) ======
+    let running = false;
+    let lookaheadTimer = null;
+    let scheduleIdx = 0;
+    let schedule = [];
+    let loopStartTime = 0;
+    let loopEndTime = 0;
+
+    function getBarsSpec(){
+      const items = [];
+      barsEl.querySelectorAll('.bar').forEach(bar=>{
+        const [rootWrap, typeWrap, beatsWrap] = bar.children;
+        const root = rootWrap.querySelector('select').value;
+        const type = typeWrap.querySelector('select').value;
+        const beats = parseInt(beatsWrap.querySelector('input').value || '4', 10);
+        items.push({root, type, beats});
+      });
+      return items;
+    }
+
+    function buildSchedule(startTime){
+      schedule = [];
+      const bpm = parseFloat(document.getElementById('bpm').value || '100');
+      const secPerBeat = 60/bpm;
+      const v = document.getElementById('voicing').value;
+      const mode = document.getElementById('mode').value;
+      const tsBeats = parseInt(document.getElementById('timesig').value,10);
+      const bars = getBarsSpec();
+      if(bars.length===0) return;
+
+      let baseOct = 4; if(v==='low') baseOct=3; if(v==='high') baseOct=5;
+
+      // Build chord timeline
+      let t = startTime;
+      bars.forEach(bar=>{
+        const rootPc = parseRootPc(bar.root);
+        const intervals = CHORDS[bar.type] || CHORDS['maj'];
+        const freqs = chordPitches(rootPc, intervals, baseOct);
+        const dur = (bar.beats||tsBeats) * secPerBeat;
+        schedule.push({t, type:'chord', data:{freqs, dur, mode}});
+        t += dur;
+      });
+
+      // Drums
+      if(document.getElementById('drumsOn').checked){
+        const pattern = document.getElementById('drumPattern').value;
+        const hatRate = parseInt(document.getElementById('hatRate').value,10);
+        const totalBeats = bars.reduce((acc,b)=>acc + (b.beats||tsBeats), 0);
+        const totalDur = totalBeats * secPerBeat;
+        const t0 = startTime;
+        const end = t0 + totalDur + 1e-6;
+        for(let tt=t0, beat=0; tt<end; tt += secPerBeat, beat++){
+          const pos = (beat % tsBeats) + 1;
+          if(pattern==='basic'){
+            if(pos===1 || pos===3) schedule.push({t:tt, type:'kick'});
+            if(pos===2 || pos===4) schedule.push({t:tt, type:'snare'});
+          }else if(pattern==='four'){
+            schedule.push({t:tt, type:'kick'});
+            if(pos===2 || pos===4) schedule.push({t:tt, type:'snare'});
+          }else if(pattern==='half'){
+            if(pos===1) schedule.push({t:tt, type:'kick'});
+            if(pos===3) schedule.push({t:tt, type:'snare'});
+          }
+          // hats
+          const hatDiv = (hatRate===16) ? 2 : 1;
+          const hatStep = (secPerBeat/2) / hatDiv;
+          for(let h=0; h<2*hatDiv; h++){
+            const ht = tt + h*hatStep;
+            if(ht < end) schedule.push({t:ht, type:'hat'});
+          }
+        }
+      }
+
+      schedule.sort((a,b)=>a.t-b.t);
+      scheduleIdx = 0;
+      loopStartTime = startTime;
+      loopEndTime = schedule.length ? schedule[schedule.length-1].t : startTime;
+      if(schedule.length){
+        const last = schedule[schedule.length-1];
+        if(last.type==='chord') loopEndTime = last.t + last.data.dur;
+      }
+    }
+
+    function scheduler(){
+      if(!running) return;
+      const lookahead = 0.2;
+      const now = ctx.currentTime;
+      while(scheduleIdx < schedule.length && schedule[scheduleIdx].t < now + lookahead){
+        const ev = schedule[scheduleIdx++];
+        if(ev.type==='chord'){ playChord(ev.data.freqs, ev.t, ev.data.dur, ev.data.mode); }
+        else if(ev.type==='kick'){ kick(ev.t); }
+        else if(ev.type==='snare'){ snare(ev.t); }
+        else if(ev.type==='hat'){ hihat(ev.t); }
+      }
+      // If we reached end of schedule, immediately build the next loop starting after current time
+      if(scheduleIdx >= schedule.length){
+        const startNext = Math.max(now + 0.05, loopEndTime + 0.02);
+        buildSchedule(startNext);
+      }
+      lookaheadTimer = setTimeout(scheduler, 25);
+    }
+
+    // Transport controls
+    document.getElementById('start').addEventListener('click', ()=>{
+      ac();
+      drumBus.gain.value = parseFloat(document.getElementById('drumVol').value || '0.25');
+      running = true;
+      buildSchedule(ctx.currentTime + 0.12);
+      scheduler();
+    });
+    document.getElementById('stop').addEventListener('click', ()=>{
+      running = false;
+      if(lookaheadTimer) clearTimeout(lookaheadTimer);
+    });
+    document.getElementById('drumVol').addEventListener('change', e=>{
+      ac(); drumBus.gain.value = parseFloat(e.target.value || '0.25');
+    });
+  </script>
+</body>
+</html>
